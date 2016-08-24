@@ -27,35 +27,50 @@ import org.apache.spark.streaming.api.java.JavaStreamingContext;
  */
 public class TestSaveToCassandra {
 
-    public static void main(String[] args) throws IOException {
+    public static void main(String[] args) throws IOException, InterruptedException {
         SparkConf conf = new SparkConf().setAppName("aaaa")
+                .setMaster("local[3]")
+                .set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
                 .set("spark.cassandra.connection.host", "192.168.100.105");
 
         JavaStreamingContext streamingContext = new JavaStreamingContext(conf, new Duration(10000));
         JavaDStream<String> stream = streamingContext.socketTextStream("192.168.100.105", 9999);
-        stream.count().print();
-        
+
+//        stream.count().print();
         SQLContext sql = SQLContext.getOrCreate(streamingContext.sparkContext().sc());
-        
-        Dataset<Name> ds = sql.createDataset(ImmutableList.of(new Name("a","b")),Encoders.bean(Name.class));
-        
-        
+
+        Dataset<Name> ds = sql.createDataset(ImmutableList.of(new Name("a", "b")), Encoders.bean(Name.class));
+
         CassandraConnector cc = CassandraConnector.apply(conf);
         try (Session session = cc.openSession()) {
             String file = IOUtils.toString(TestSaveToCassandra.class.getResourceAsStream("/c.sql"));
             Arrays.stream(file.split(";"))
                     .map(s -> s.trim())
                     .filter(s -> !s.isEmpty())
-                    .map(s -> s+";")
+                    .map(s -> s + ";")
                     .forEach((String str) -> session.execute(str));
         }
-        
+
+//        ds.toDF().write().mode(SaveMode.Overwrite).option("truncate", "true").jdbc("", "", new Properties());
         JavaDStream<Name> map = stream.map(s -> new Name(s, "e"));
+        map.foreachRDD(rdd -> {
+            if (!rdd.isEmpty()) {
+                SQLContext sqlStream = SQLContext.getOrCreate(rdd.context());
+
+                sqlStream
+                        .read()
+                        .format("org.apache.spark.sql.cassandra")
+                        .option("keyspace", "keyspace1")
+                        .option("table", "name")
+                        .load()
+                        .show();
+            }
+        });
         CassandraStreamingJavaUtil
-                    .javaFunctions(map)
-                    .writerBuilder("keyspace1", "name", CassandraJavaUtil.mapToRow(Name.class))
-                    .saveToCassandra();
-        
+                .javaFunctions(map)
+                .writerBuilder("keyspace1", "name", CassandraJavaUtil.mapToRow(Name.class))
+                .saveToCassandra();
+
         streamingContext.start();
         streamingContext.awaitTermination();
     }
